@@ -4,8 +4,7 @@
 一次性 CLI，掛 volume 跑完就退，主力處理 PDF。
 
 這個 repo 只放打包相關的檔案 —— 原始碼在 build 階段從上游 public repo clone（原封不動），
-任何機器 clone 這個 repo 就能 build。
-2026-07 在 Apple Silicon（linux/arm64）實機驗證通過；amd64 亦可 build。
+clone 這個 repo 就能 build，支援 linux/arm64 與 amd64。
 
 ---
 
@@ -34,7 +33,7 @@ docker compose run --rm doc-cleaner -i /data/report.pdf --ai none
 
 ### 加密 PDF（對帳單、ETC 報表這類）
 
-三種給密碼的方式，都實測過：
+三種給密碼的方式：
 
 ```bash
 # 方式 1：CLI 參數（一次性，最直覺）
@@ -43,7 +42,7 @@ docker compose run --rm doc-cleaner -i /data/statement.pdf --password 'A12345678
 # 方式 2：環境變數（不想讓密碼進 shell history 的話搭配 read -s 使用）
 docker compose run --rm -e PDF_PASSWORD='A123456789' doc-cleaner -i /data/statement.pdf --ai none
 
-# 方式 3：寫在 .env（固定密碼最方便，例如都是自己的證件字號）
+# 方式 3：寫在 .env（密碼固定時最方便，例如都是自己的身分證字號）
 echo 'PDF_PASSWORD=A123456789' >> .env
 docker compose run --rm doc-cleaner -i /data/statement.pdf --ai none
 ```
@@ -76,7 +75,7 @@ Ollama server 跑在 host（不在容器內），compose 已把 `OLLAMA_HOST` �
 docker compose run --rm doc-cleaner -i /data/report.pdf --ai ollama
 ```
 
-### 支援格式（上游 16 種中的 14 種，依 image 內依賴實測）
+### 支援格式（上游 16 種中的 14 種）
 
 | 類別 | 格式 | 備註 |
 |------|------|------|
@@ -87,8 +86,8 @@ docker compose run --rm doc-cleaner -i /data/report.pdf --ai ollama
 | 工程圖 | DXF | |
 | 純文字 | TXT、MD、JSONL | |
 
-**不支援：** PPT / DOC / PAGES —— 上游靠 macOS 系統工具（textutil / QuickLook），
-Linux 容器無解，已決定放棄。
+**不支援：** PPT / DOC / PAGES —— 上游處理這三種格式靠 macOS 系統工具
+（textutil / QuickLook），Linux 容器內拿不到。
 
 ---
 
@@ -120,35 +119,35 @@ ln -sfn "$(pwd)" ~/.claude/skills/doc-cleaner-docker
 
 ---
 
-## 設計決策（已定案，改之前先想清楚）
+## 設計說明
 
-1. **形態 = 一次性 CLI**，掛 volume，不做常駐服務。
-2. **配置 = 中等**：含 Java（JRE，給 opendataloader-pdf 表格提取）+ poppler（掃描 vision）。
-   image 約 765MB。
-3. **AI backend 全保留**：gemini / groq / ollama / none 都能跑，key 用 env 傳。
-4. **非 root 執行**：UID/GID 預設 1000，可用
-   `--build-arg APP_UID=<uid> APP_GID=<gid>` 對齊宿主帳號，輸出檔 owner 才乾淨。
-5. **上游程式碼原封不動**：build 時 clone、不 vendor、不套 patch，
-   更新只要 `--no-cache` 重 build 就拿到上游新版。
+- **一次性 CLI**：掛 volume、跑完就退，不是常駐服務。
+- **內建 Java + poppler**：Java 給 opendataloader-pdf 做表格提取、poppler 給掃描 PDF 的
+  vision 模式，image 約 765MB。不需要表格提取的話，可以自行 fork 拿掉
+  `default-jre-headless` 和 `opendataloader-pdf`，能縮到約 300MB。
+- **AI backend 不綁定**：gemini / groq / ollama / none 都能跑，key 用環境變數傳，
+  image 裡不含任何金鑰。
+- **非 root 執行**：UID/GID 預設 1000，可用 `--build-arg APP_UID=<uid> APP_GID=<gid>`
+  對齊宿主帳號，輸出檔的 owner 才不會是 root。
+- **上游程式碼原封不動**：build 時 clone、不 vendor、不套 patch，
+  更新只要 `--no-cache` 重 build 就拿到上游新版。
 
-## 兩個踩過的坑（改 Dockerfile / compose / entrypoint 前必讀）
+兩個不那麼直覺、但動 Dockerfile / compose / entrypoint 前需要知道的地方：
 
-1. **上游的 `output/` 是 Python package**（`cleaner.py` 會 import），不是輸出目錄。
-   所以 volume 不能掛在 `/app/output` 把它蓋掉 —— 這就是為什麼輸出目錄用 `/app/out`、
-   entrypoint 帶 `-o /app/out`。
-2. **ODL 預設把暫存 `.md` 寫在輸入檔旁邊**，輸入掛唯讀直接跑就會失敗、
-   默默退回 PyMuPDF（表格品質差）。所以 `entrypoint.sh` 會先把 `/data` 複製到
-   容器內的 `/work` 再處理：暫存檔寫在副本旁邊、隨容器退出消失，
-   原始檔完全不被碰，輸入 mount 得以維持 `:ro`。
+1. **輸出掛 `/app/out` 而不是預設的 `./output`**：上游 repo 的 `output/` 是
+   Python package（`cleaner.py` 會 import），volume 掛在 `/app/output` 會把它蓋掉、
+   容器直接 crash。這也是 entrypoint 固定帶 `-o /app/out` 的原因。
+2. **entrypoint 會先把 `/data` 複製到容器內的 `/work` 再處理**：
+   opendataloader-pdf 會把暫存 `.md` 寫在輸入檔旁邊，輸入掛唯讀直接跑會失敗、
+   默默退回 PyMuPDF（表格品質差很多）。複製一份處理，暫存檔隨容器退出消失，
+   原始檔不被碰，輸入 mount 得以維持 `:ro`。
 
 ---
 
-## 尚未做的選配
+## 部署備註
 
-- **完全離線**：ODL 的 Java jar 已隨 wheel 打包（不是執行時下載），理論上斷網可跑，
-  正式離線部署前建議實測一次。
-- **瘦身版**：確定不需要表格提取的話，拿掉 `default-jre-headless` + `opendataloader-pdf`，
-  可從 765MB 降到約 300MB。
-- **NAS 部署**：NAS 上 `host.docker.internal` 會指向 NAS 自己，
-  `OLLAMA_HOST` 要改成 Ollama 所在機器的固定 IP；build 時帶 NAS 宿主的 UID/GID。
+- **離線環境**：ODL 的 Java jar 已隨 pip wheel 打包（不是執行時下載），
+  理論上斷網可跑，正式離線部署前建議先實測。
+- **NAS**：在 NAS 上 `host.docker.internal` 會指向 NAS 自己，用 Ollama 的話
+  要把 `OLLAMA_HOST` 改成 Ollama 所在機器的 IP；build 時帶 NAS 宿主的 UID/GID。
 
