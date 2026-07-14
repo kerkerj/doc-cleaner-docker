@@ -1,0 +1,34 @@
+# 一次性 CLI 用法：
+#   docker compose build
+#   docker compose run --rm doc-cleaner -i /data/report.pdf --ai none
+#
+# 把要處理的檔案放進 ./input，產出的 .md 會出現在 ./output
+services:
+  doc-cleaner:
+    build:
+      context: .
+      args:
+        # 上游 doc-cleaner 的版本；預設跟 main，要釘死可改成 tag / commit
+        DOC_CLEANER_REF: "main"
+        APP_UID: "1000"   # 跑在 NAS 上時可改成宿主的 UID
+        APP_GID: "1000"   # 跑在 NAS 上時可改成宿主的 GID
+    image: doc-cleaner:local
+
+    # .env 不存在也不會報錯（--ai none 時本來就不需要 key）
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      # 只有 --ai ollama 時才會用到；指向 host 上的 Ollama
+      OLLAMA_HOST: "http://host.docker.internal:11434"
+
+    # Linux host 需要這行才能解析 host.docker.internal；Mac Desktop 加了也無害
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      - ./input:/data:ro        # 輸入（唯讀）
+      # 掛 /app/out 而不是 /app/output：/app/output 是程式碼模組（cleaner.py 會 import），
+      # 被 volume 蓋掉的話容器會直接 crash
+      - ./output:/app/out       # 輸出

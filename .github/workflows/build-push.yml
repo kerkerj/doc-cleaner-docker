@@ -1,0 +1,40 @@
+# push 到 main 自動 build 雙架構 image 推 ghcr
+# 上游 doc-cleaner 更新時，repo 沒改動也能手動觸發（workflow_dispatch）重建
+#
+# 不開 layer cache：Dockerfile 的 clone 層一旦被 cache，上游更新就吃不到，
+# 這個 build 本來就只要幾分鐘，用正確性換速度不划算。
+name: build-push
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # arm64 + amd64：涵蓋 Apple Silicon 與 x86 的 NAS / 伺服器
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}

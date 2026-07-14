@@ -1,0 +1,8 @@
+# 本地輸入/輸出與機密，不進版控
+input/
+output/
+.env
+
+# 本地工具狀態
+.claude/
+.DS_Store
