@@ -1,0 +1,164 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: kerkerj <jerry54010@gmail.com>
+Date: Mon, 28 Sep 2026 17:34:54 +0800
+Subject: [PATCH] fix(pdf): strip every ODL image reference so image-only PDFs
+ route to vision
+
+ODL emits image refs as bare ![](<...>) or wrapped in table cells
+|![image N](<...>)|; the line-anchored regex kept both. The dangling refs
+made text-as-image statements look dense, classify as native, and reach
+the AI backend with no page images.
+---
+ parsers/pdf.py            | 29 +++++++++++--
+ tests/test_pdf_routing.py | 88 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 114 insertions(+), 3 deletions(-)
+
+diff --git a/parsers/pdf.py b/parsers/pdf.py
+index 1416fbf..37cdd52 100644
+--- a/parsers/pdf.py
++++ b/parsers/pdf.py
+@@ -111,19 +111,42 @@ def odl_available():
+     return _odl_available_cache
+ 
+ 
++_ODL_IMAGE_REF = re.compile(r"!\[[^\]]*\]\((?:<[^>]*>|[^)\s]*)\)")
++_TABLE_FILLER = re.compile(r"[|:\-\s]*")
++
++
++def _drop_empty_tables(text):
++    """Drop pipe-table blocks whose cells are all empty (e.g. image-only grids)."""
++    lines = text.split("\n")
++    out, block = [], []
++    for line in lines + [""]:
++        if line.lstrip().startswith("|"):
++            block.append(line)
++            continue
++        if block and not all(_TABLE_FILLER.fullmatch(row) for row in block):
++            out.extend(block)
++        block = []
++        out.append(line)
++    return "\n".join(out[:-1])
++
++
+ def clean_odl_output(text):
+     """
+     Post-process opendataloader-pdf output:
+     - Replace <br> / <br/> / <br /> with a single space
+-    - Remove ![image N](...) lines
++    - Remove image references wherever they appear (bare, numbered, in table cells)
++    - Drop tables left with no content
+     - Compress 3+ consecutive blank lines to 1
+     - Strip leading/trailing whitespace
+     """
+     # ODL emits <br> inside table cells; downstream Markdown consumers (and
+     # the in-app preview) treat them as literal text.
+     text = re.sub(r"<br\s*/?>", " ", text)
+-    # Remove image reference lines
+-    text = re.sub(r"^!\[image \d+\]\([^)]*\)\s*$", "", text, flags=re.MULTILINE)
++    # Image refs point into the *_images/ dir that _collect_odl_output deletes,
++    # so they are never content. Left in, an image-only PDF (text drawn as
++    # images) looks dense enough to classify as native and skips vision.
++    text = _ODL_IMAGE_REF.sub("", text)
++    text = _drop_empty_tables(text)
+     # Compress 3+ blank lines to 1
+     text = re.sub(r"\n{3,}", "\n\n", text)
+     return text.strip()
+diff --git a/tests/test_pdf_routing.py b/tests/test_pdf_routing.py
+index f0845ce..c6c1e37 100644
+--- a/tests/test_pdf_routing.py
++++ b/tests/test_pdf_routing.py
+@@ -98,3 +98,91 @@ class TestCleanOdlBr:
+         out = clean_odl_output(s)
+         assert "<br" not in out
+         assert "|x  y|z|" in out or "|x y|z|" in out
++
++
++class TestCleanOdlImageRefs:
++    """ODL writes image references pointing into its *_images/ side-effect dir,
++    which _collect_odl_output deletes. The refs are dangling and must not count
++    as extracted text, whatever shape ODL emits them in."""
++
++    def test_bare_ref_without_alt_removed(self):
++        s = "![](<doc_images/imageFile2.png>)\n\n![](<doc_images/imageFile3.png>)"
++        assert clean_odl_output(s) == ""
++
++    def test_numbered_ref_with_angle_path_removed(self):
++        assert clean_odl_output("![image 12](<doc_decrypted_images/imageFile12.png>)") == ""
++
++    def test_table_wrapped_refs_leave_no_table(self):
++        s = (
++            "|![image 1](<doc_images/imageFile1.png>)|\n|---|\n\n"
++            "|![image 2](<doc_images/imageFile2.png>)  ![image 3](<doc_images/imageFile3.png>)|\n|---|"
++        )
++        assert clean_odl_output(s) == ""
++
++    def test_real_table_and_prose_kept(self):
++        s = (
++            "Statement 2026-09\n\n"
++            "|日期|摘要|金額|\n|---|---|---|\n"
++            "|09/05|![image 4](<doc_images/imageFile4.png>) 刷卡|-3,210|"
++        )
++        out = clean_odl_output(s)
++        assert "![" not in out
++        assert "Statement 2026-09" in out
++        assert "|日期|摘要|金額|" in out
++        assert "|---|---|---|" in out
++        assert "-3,210" in out
++
++
++def _image_only_pdf(path, pages=2):
++    """Every cell is an embedded PNG; the PDF has no text layer at all."""
++    import io
++    from PIL import Image, ImageDraw
++    doc = fitz.open()
++    for _ in range(pages):
++        page = doc.new_page()
++        for r in range(4):
++            for c in range(4):
++                img = Image.new("RGB", (200, 40), "white")
++                ImageDraw.Draw(img).text((6, 10), f"{r}-{c} 1,234", fill="black")
++                buf = io.BytesIO()
++                img.save(buf, format="PNG")
++                x, y = 40 + c * 110, 100 + r * 26
++                page.insert_image(fitz.Rect(x, y, x + 108, y + 22), stream=buf.getvalue())
++    doc.save(path)
++    doc.close()
++
++
++class TestImageOnlyPdfRouting:
++    """A PDF whose text exists only as images must reach the AI backend as
++    page images, not as a pile of dangling ODL image references."""
++
++    ODL_IMAGE_ONLY = "\n\n".join(
++        f"|![image {i}](<statement_images/imageFile{i}.png>)|\n|---|" for i in range(1, 40)
++    )
++
++    class _RecordingBackend:
++        def __init__(self):
++            self.calls = []
++
++        def call(self, prompt, images=None, text=None):
++            self.calls.append({"images": images, "text": text})
++            return '{"title": "t", "summary": "s", "refined_markdown": "body", "tags": []}'
++
++    def test_page_images_sent_to_ai(self, tmp_path, monkeypatch):
++        from cleaner import load_config, process_file
++        import parsers.pdf as pdfmod
++
++        src = str(tmp_path / "statement.pdf")
++        _image_only_pdf(src)
++        pages = ["page-1", "page-2"]
++        monkeypatch.setattr(pdfmod, "has_tables", lambda p: False)
++        monkeypatch.setattr(pdfmod, "extract_text_odl",
++                            lambda p: pdfmod.clean_odl_output(self.ODL_IMAGE_ONLY))
++        monkeypatch.setattr(pdfmod, "extract_images", lambda p, dpi=200, max_pages=15: pages)
++        backend = self._RecordingBackend()
++        out_dir = str(tmp_path / "out")
++        status, _ = process_file(src, backend, "prompt", load_config(None), out_dir)
++        assert status == "ok"
++        assert len(backend.calls) == 1
++        assert backend.calls[0]["images"] == pages
++        assert "![" not in (backend.calls[0]["text"] or "")
+-- 
+2.55.0
+

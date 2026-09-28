@@ -3,7 +3,7 @@
 [doc-cleaner](https://github.com/notoriouslab/doc-cleaner)（日常文件轉 Markdown）的 **Linux 容器打包**：
 一次性 CLI，掛 volume 跑完就退，主力處理 PDF。
 
-這個 repo 只放打包相關的檔案 —— 原始碼在 build 階段從上游 public repo clone（原封不動），
+這個 repo 只放打包相關的檔案 —— 原始碼在 build 階段從上游 public repo 抓固定 commit，再套 `patches/` 裡的修正，
 clone 這個 repo 就能 build，支援 linux/arm64 與 amd64。
 
 ---
@@ -94,16 +94,27 @@ docker compose run --rm doc-cleaner -i /data/report.pdf --ai ollama
 ## 上游更新後怎麼重建
 
 ```bash
-# clone 那層有 cache，要吃到上游新 commit 得 --no-cache
-# （或把 compose 裡的 DOC_CLEANER_REF 改成新的 tag / commit 再普通 build）
-docker compose build --no-cache
+# 1. 把 Dockerfile 的 DOC_CLEANER_REF 改成上游新的 commit
+# 2. 普通 build；patch 套不上會直接失敗，這時看上游是不是已經修了（修了就刪 patch）
+docker compose build
 
-# 跑一份測試 PDF 確認沒壞
+# 3. 跑一份測試 PDF 確認沒壞
 docker compose run --rm doc-cleaner -i /data/<某檔>.pdf --ai none --verbose
 ```
 
-`--verbose` 時留意分流結果：有表格的原生 PDF 應該走
-「**Native PDF via ODL (tables detected)**」，如果退回 PyMuPDF 表示 ODL 路徑壞了。
+`--verbose` 時留意分流結果：
+
+| PDF | 預期 log |
+|---|---|
+| 有表格的原生 PDF | `Native PDF (density=…)`（走 PyMuPDF 表格路徑，不經 ODL） |
+| 沒表格的原生 PDF | `Native PDF via ODL (…)` |
+| 掃描檔、文字全是圖片的 PDF | `Scanned PDF (density=0)`，AI 模式會收到整頁影像 |
+
+### patches/
+
+| patch | 修什麼 | 什麼時候刪 |
+|---|---|---|
+| `0001-odl-image-only-routing.patch` | ODL 會把圖片引用包在表格裡或不帶 alt 輸出，上游只刪整行的 `![image N](...)`。文字全是圖片的 PDF（例如中信電子對帳單）因此被圖片引用灌出密度、判成原生 PDF，AI 模式收不到頁面影像 | 上游合併同樣的修正後 |
 
 ---
 
@@ -129,8 +140,9 @@ ln -sfn "$(pwd)" ~/.claude/skills/doc-cleaner-docker
   image 裡不含任何金鑰。
 - **非 root 執行**：UID/GID 預設 1000，可用 `--build-arg APP_UID=<uid> APP_GID=<gid>`
   對齊宿主帳號，輸出檔的 owner 才不會是 root。
-- **上游程式碼原封不動**：build 時 clone、不 vendor、不套 patch，
-  更新只要 `--no-cache` 重 build 就拿到上游新版。
+- **上游程式碼釘 commit + 最少 patch**：build 時抓固定 commit、不 vendor，
+  只在 `patches/` 放上游還沒修的 bug。釘 commit 是因為上游 `--version` 寫死 1.2.0
+  好幾個 release，跟 main 的話事後查不出 image 裡是哪一版。
 
 兩個不那麼直覺、但動 Dockerfile / compose / entrypoint 前需要知道的地方：
 

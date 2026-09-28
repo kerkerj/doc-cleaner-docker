@@ -8,8 +8,7 @@ services:
     build:
       context: .
       args:
-        # 上游 doc-cleaner 的版本；預設跟 main，要釘死可改成 tag / commit
-        DOC_CLEANER_REF: "main"
+        # 上游 doc-cleaner 的 commit 釘在 Dockerfile 的 DOC_CLEANER_REF，只改那裡
         APP_UID: "1000"   # 跑在 NAS 上時可改成宿主的 UID
         APP_GID: "1000"   # 跑在 NAS 上時可改成宿主的 GID
     image: doc-cleaner:local

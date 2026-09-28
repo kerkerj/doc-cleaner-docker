@@ -2,16 +2,23 @@
 # 配置：中等（PDF 表格/掃描）+ AI backend 全保留彈性
 # 目標平台：linux/arm64（Apple Silicon M1/M4 已實測）；amd64 亦可 build
 #
-# 原始碼在 build 階段從上游 public repo clone（原封不動，不套 patch），
-# 這個 repo 只放打包相關的檔案。更新上游 = docker compose build --no-cache。
+# 原始碼在 build 階段從上游 public repo 抓固定 commit，再套 patches/ 底下的修正，
+# 這個 repo 只放打包相關的檔案。更新上游 = 改 DOC_CLEANER_REF 再 build；
+# patch 套不上時 build 直接失敗，不會默默產出沒修的 image。
 
 # --- Stage 1：抓上游原始碼 ---
 FROM python:3.12-slim AS src
 ARG DOC_CLEANER_REPO=https://github.com/notoriouslab/doc-cleaner.git
-ARG DOC_CLEANER_REF=main
+# 釘 commit 而不是 main：上游 cleaner.py 的版本號寫死過 1.2.0 好幾個 release，
+# 只看 --version 追不到 image 裡實際是哪一版
+ARG DOC_CLEANER_REF=55e3c472ac4875c3bb923b2d82821fec15444cc0
 RUN apt-get update && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/* \
-    && git clone --depth 1 --branch ${DOC_CLEANER_REF} ${DOC_CLEANER_REPO} /src \
+    && git init -q /src \
+    && git -C /src fetch -q --depth 1 ${DOC_CLEANER_REPO} ${DOC_CLEANER_REF} \
+    && git -C /src checkout -q FETCH_HEAD
+COPY patches/ /patches/
+RUN for p in /patches/*.patch; do git -C /src apply --verbose "$p" || exit 1; done \
     && rm -rf /src/.git
 
 # --- Stage 2：runtime ---
